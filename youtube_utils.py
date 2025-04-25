@@ -7,6 +7,7 @@ import re
 from urllib.request import urlretrieve
 import streamlit as st
 from isodate import parse_duration
+import zipfile
 
 API_KEY = st.secrets["API_KEY"]
 
@@ -111,8 +112,12 @@ def buscar_videos(termo, max_results=30, min_views=10000, max_idade_dias=180,
 def limpar_nome_arquivo(titulo):
     return re.sub(r'[\\\\/*?:"<>|]', "", titulo)[:100]
 
+
+
 def baixar_thumbs(df, pasta='thumbs'):
     os.makedirs(pasta, exist_ok=True)
+    arquivos_thumbs = []
+    
     for _, row in df.iterrows():
         video_id = row['video_id']
         titulo_limpo = limpar_nome_arquivo(row['title'])
@@ -120,6 +125,15 @@ def baixar_thumbs(df, pasta='thumbs'):
         caminho = os.path.join(pasta, f"{titulo_limpo}_{video_id}.jpg")
         try:
             urlretrieve(thumb_url, caminho)
+            arquivos_thumbs.append(caminho)
             print(f"Thumb salva: {caminho}")
         except Exception as e:
             print(f"Erro ao baixar thumb {video_id}: {e}")
+    
+    # Compactar em ZIP
+    zip_path = "thumbs.zip"
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for arquivo in arquivos_thumbs:
+            zipf.write(arquivo, arcname=os.path.basename(arquivo))
+    
+    return zip_path
