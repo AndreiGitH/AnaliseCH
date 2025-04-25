@@ -115,12 +115,12 @@ if st.session_state.df_resultados is not None:
     
 
     if st.button("📸 Baixar Thumbnails"):
-    zip_file_path = baixar_thumbs(df)
-    
-    with open(zip_file_path, "rb") as fp:
-        st.download_button(
-            label="📥 Baixar ZIP de Thumbnails",
-            data=fp,
-            file_name="thumbnails.zip",
-            mime="application/zip"
-        )
+        zip_file_path = baixar_thumbs(df)
+        
+        with open(zip_file_path, "rb") as fp:
+            st.download_button(
+                label="📥 Baixar ZIP de Thumbnails",
+                data=fp,
+                file_name="thumbnails.zip",
+                mime="application/zip"
+            )
