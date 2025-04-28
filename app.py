@@ -1,126 +1,188 @@
+#!/usr/bin/env python3
+"""
+Streamlit · SRT ▶︎ Gemini Flash ▶︎ Imagens
+------------------------------------------
+• Agrupa legendas até 20–30 palavras (termina no timestamp atual).
+• Gemini 2 Flash (texto) cria prompt cinematográfico (EN, reforça 16:9).
+• Gemini 2 Flash-Exp (v1alpha) gera imagem (Tenta até 3×; se não vier, pula).
+• Guarda bytes em session_state para persistir entre reruns.
+• Exibe galeria + download individual + ZIP com todas.
+"""
+from __future__ import annotations
+from pathlib import Path
+from typing import List
+import time, io, zipfile
+
 import streamlit as st
-import pandas as pd
-import os
-import io 
-from youtube_utils import buscar_videos, baixar_thumbs
+import pysrt
+import google.genai as genai
+from google.genai import types
 
-st.set_page_config(page_title="Buscador de Vídeos Bíblicos", layout="wide")
-st.title("Buscador de Vídeos Virais")
+# In-memory image handling
+from PIL import Image
+from io import BytesIO
 
-if 'df_resultados' not in st.session_state:
-    st.session_state.df_resultados = None
+# —— estilo turbinado ——
+STYLE_SUFFIX = (
+    "Ultra-realistic, cinematic lighting, volumetric light, dramatic contrast, "
+    "film still, epic composition, highly detailed, 4K HDR, masterpiece, "
+    "shallow depth-of-field, 35 mm lens, photorealistic, biblical times, "
+    "ancient Middle-East setting, 16:9 aspect ratio, no text."
+)
 
-# CARREGAR TERMOS PADRÃO DE TXT
-TERMO_BUSCA_PADRAO = "termos_busca.txt"
-NEGATIVOS_PADRAO = "termos_excluir.txt"
-CANAIS_EXCLUIR_PADRAO = "canais_excluir.txt"
+# —— session state init ——
+if "imgs" not in st.session_state:
+    st.session_state["imgs"] = []  # lista de dicts {"name", "bytes"}
 
-# Carregar termos de busca iniciais
-valor_termos = ""
-if os.path.exists(TERMO_BUSCA_PADRAO):
-    with open(TERMO_BUSCA_PADRAO, encoding="utf-8") as f:
-        valor_termos = f.read()
+# —— helpers de tempo ——
+def tag(t: pysrt.SubRipTime) -> str:
+    return f"{t.hours:02d}_{t.minutes:02d}_{t.seconds:02d}_{int(t.milliseconds):03d}"
 
-# TERMOS POSITIVOS
-termos_input = st.text_area("Digite os termos para buscar (1 por linha):", value=valor_termos)
-termos = [t.strip() for t in termos_input.splitlines() if t.strip()]
+def agrupar_blocos(subs: List[pysrt.SubRipItem], min_w=20, max_w=30):
+    blocos, txt, start = [], [], None
+    for s in subs:
+        words = s.text.replace("\n", " ").split()
+        if not words:
+            continue
+        start = start or s.start
+        txt.extend(words)
+        if len(txt) >= min_w:
+            blocos.append({
+                "start": start,
+                "end": s.end,
+                "text": " ".join(txt[:max_w])
+            })
+            txt, start = [], None
+    if txt:
+        blocos.append({
+            "start": start,
+            "end": subs[-1].end,
+            "text": " ".join(txt)
+        })
+    return blocos
 
-# Carregar termos negativos de txt
-valor_negativos = ""
-if os.path.exists(NEGATIVOS_PADRAO):
-    with open(NEGATIVOS_PADRAO, encoding="utf-8") as f:
-        valor_negativos = f.read()
-negativos_input = st.text_area("Excluir títulos com estas palavras (1 por linha):", value=valor_negativos)
-negativos = [t.strip().lower() for t in negativos_input.splitlines() if t.strip()]
+# —— gerar prompt cinematográfico ——
+def gerar_prompt(client_txt, texto: str) -> str:
+    pedido = (
+        "Create a concise, vivid, image generation prompt that represents "
+        "this biblical scene. The prompt must end with the quality parameters and explicitly "
+        "keep 16:9 aspect ratio.\n\n"
+        f"Scene:\n{texto}\n\n"
+        f"Quality parameters:\n{STYLE_SUFFIX}"
+    )
+    try:
+        resp = client_txt.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=pedido
+        )
+        if (resp.candidates
+            and resp.candidates[0].content
+            and resp.candidates[0].content.parts):
+            return resp.candidates[0].content.parts[0].text.strip()
+    except Exception as e:
+        st.warning(f"⚠️ Falha ao gerar prompt: {e}")
+    # fallback
+    return f"{texto}, {STYLE_SUFFIX}"
 
-# Carregar canais excluídos de txt
-valor_canais = ""
-if os.path.exists(CANAIS_EXCLUIR_PADRAO):
-    with open(CANAIS_EXCLUIR_PADRAO, encoding="utf-8") as f:
-        valor_canais = f.read()
-canais_input = st.text_area("Excluir vídeos destes canais (1 por linha):", value=valor_canais)
-canais_excluidos = [c.strip().lower() for c in canais_input.splitlines() if c.strip()]
-
-# QUANTIDADE DE VÍDEOS
-max_results = st.number_input("Quantidade de vídeos por termo:", min_value=1, max_value=50, value=30, step=1)
-
-# VIEWS MÍNIMAS
-min_views = st.number_input("Quantidade mínima de visualizações:", min_value=0, value=10000, step=1000)
-
-# INSCRITOS
-min_inscritos = st.number_input("Mínimo de inscritos no canal:", min_value=0, value=1000, step=100)
-max_inscritos = st.number_input("Máximo de inscritos no canal:", min_value=0, value=1000000, step=1000)
-
-# IDADE MÁXIMA
-max_idade_dias = st.number_input("Idade máxima do vídeo (em dias):", min_value=1, value=180, step=1)
-
-# LOCALIZAÇÃO E IDIOMA
-pais = st.selectbox("Filtrar por país:", ["Todos", "BR", "US", "IL", "IN", "PT", "MX"])
-region_code = None if pais == "Todos" else pais
-
-idioma = st.selectbox("Filtrar por idioma:", ["Todos", "Português", "Inglês", "Espanhol"])
-lang_map = {"Todos": None, "Português": "pt", "Inglês": "en", "Espanhol": "es"}
-relevance_language = lang_map[idioma]
-
-# DURAÇÃO
-duracao = st.selectbox("Filtrar por duração do vídeo:", ["Todos", "Curtos (<4min)", "Médios (4-20min)", "Longos (>20min)"])
-duracao_map = {"Todos": "any", "Curtos (<4min)": "short", "Médios (4-20min)": "medium", "Longos (>20min)": "long"}
-video_duration = duracao_map[duracao]
-
-# BOTÃO DE BUSCA
-if st.button("Buscar vídeos"):
-    todos_videos = []
-    with st.spinner("Buscando vídeos..."):
-        for termo in termos:
-            todos_videos.extend(buscar_videos(
-                termo,
-                max_results=max_results,
-                min_views=min_views,
-                max_idade_dias=max_idade_dias,
-                min_subs=min_inscritos,
-                max_subs=max_inscritos,
-                region_code=region_code,
-                video_duration=video_duration,
-                relevance_language=relevance_language
-            ))
-
-    df = pd.DataFrame(todos_videos).drop_duplicates(subset='video_id')
-
-    if not df.empty:
-        if negativos:
-            df = df[~df['title'].str.lower().str.contains('|'.join(negativos))]
-        if canais_excluidos:
-            df = df[~df['channel'].str.lower().isin(canais_excluidos)]
-
-    if df.empty:
-        st.warning("Nenhum vídeo encontrado com os filtros aplicados.")
-        st.session_state.df_resultados = None
-    else:
-        df['published_at'] = pd.to_datetime(df['published_at'])
-        df['dias_desde_pub'] = (pd.Timestamp.utcnow() - df['published_at']).dt.days
-        df['views_por_dia'] = (df['views'] / df['dias_desde_pub'].replace(0, 1)).round(2)
-        st.session_state.df_resultados = df
-        st.success(f"{len(df)} vídeos encontrados.")
-
-if st.session_state.df_resultados is not None:
-    df = st.session_state.df_resultados
-    st.dataframe(df[['title', 'channel', 'views', 'views_por_dia', 'published_at', 'search_term']])
-
-    # CORRIGIDO: gerar CSV com BOM usando BytesIO
-    output = io.BytesIO()
-    df.to_csv(output, sep=';', decimal=',', encoding='utf-8-sig', index=False, float_format='%.2f')
-    csv_bytes = output.getvalue()
-
-    st.download_button("📅 Baixar CSV", data=csv_bytes, file_name="videos_biblicos.csv", mime="text/csv")
-    
-
-    if st.button("📸 Baixar Thumbnails"):
-        zip_file_path = baixar_thumbs(df)
-        
-        with open(zip_file_path, "rb") as fp:
-            st.download_button(
-                label="📥 Baixar ZIP de Thumbnails",
-                data=fp,
-                file_name="thumbnails.zip",
-                mime="application/zip"
+# —— gerar imagem com retentativas e checagem robusta ——
+def gerar_imagem(client_img, prompt: str, tries: int = 3) -> bytes | None:
+    for attempt in range(tries):
+        try:
+            resp = client_img.models.generate_content(
+                model="gemini-2.0-flash-exp-image-generation",
+                contents=[prompt],
+                config=types.GenerateContentConfig(response_modalities=["TEXT", "IMAGE"])
             )
+        except Exception as e:
+            st.warning(f"⚠️ Erro no attempt {attempt+1}: {e}")
+            time.sleep(1.0)
+            continue
+
+        # validação completa antes de acessar parts
+        if (resp.candidates
+            and resp.candidates[0].content
+            and resp.candidates[0].content.parts):
+            for part in resp.candidates[0].content.parts:
+                if part.inline_data:
+                    return part.inline_data.data
+        # pausa antes da próxima tentativa
+        time.sleep(1.2)
+    return None  # falhou todas as tentativas
+
+# —— Streamlit UI ——
+st.set_page_config(page_title="SRT ▶︎ Gemini Imagens", layout="wide")
+st.title("🎞️ SRT → Gemini Flash → Imagens Cinematográficas")
+
+# API key e clients
+api_key = st.secrets.get("GEMINI_API_KEY")
+if not api_key:
+    st.error("Configure GEMINI_API_KEY em Settings ▸ Secrets")
+    st.stop()
+
+client_txt = genai.Client(api_key=api_key)  # v1beta (texto)
+client_img = genai.Client(
+    api_key=api_key,
+    http_options=types.HttpOptions(api_version="v1alpha")
+)
+
+# controles
+min_w = st.sidebar.number_input("Mín. palavras/bloco", 10, 30, 20)
+max_w = st.sidebar.number_input("Máx. palavras/bloco", 20, 60, 30)
+
+uploaded = st.file_uploader("📂 Faça upload do arquivo .srt", type="srt")
+
+if st.button("🚀 Gerar Imagens"):
+    if not uploaded:
+        st.warning("Envie um .srt antes de gerar.")
+        st.stop()
+
+    subs   = pysrt.from_string(uploaded.getvalue().decode("utf-8"))
+    blocos = agrupar_blocos(subs, min_w, max_w)
+    st.info(f"{len(blocos)} blocos serão processados.")
+    prog = st.progress(0.0)
+
+    out_dir = Path("output_images")
+    out_dir.mkdir(exist_ok=True)
+
+    for i, blk in enumerate(blocos, 1):
+        prompt = gerar_prompt(client_txt, blk["text"])
+        img_bytes = gerar_imagem(client_img, prompt)
+
+        if img_bytes is None:
+            st.warning(f"⚠️ Bloco {i}: sem imagem após {tries} tentativas, pulado.")
+            prog.progress(i / len(blocos))
+            continue
+
+        fname = f"{tag(blk['start'])}-{tag(blk['end'])}.png"
+        (out_dir / fname).write_bytes(img_bytes)
+        st.session_state["imgs"].append({"name": fname, "bytes": img_bytes})
+        prog.progress(i / len(blocos))
+
+    st.success("✔️ Processamento concluído! Role para ver a galeria abaixo.")
+
+# — galeria persistente —
+if st.session_state["imgs"]:
+    st.header("📸 Imagens Geradas")
+    for item in st.session_state["imgs"]:
+        st.image(item["bytes"], caption=item["name"], use_column_width=True)
+        st.download_button(
+            label=f"Baixar {item['name']}",
+            data=item["bytes"],
+            file_name=item["name"],
+            mime="image/png",
+            key=f"dl-{item['name']}"
+        )
+
+    # ZIP on-the-fly
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in st.session_state["imgs"]:
+            zf.writestr(item["name"], item["bytes"])
+    buf.seek(0)
+    st.download_button(
+        "⬇️ Baixar todas as imagens (.zip)",
+        data=buf,
+        file_name="todas_as_imagens.zip",
+        mime="application/zip",
+        key="zip-all"
+    )
