@@ -104,7 +104,7 @@ if st.button("Buscar vídeos"):
 
 if st.session_state.df_resultados is not None:
     df = st.session_state.df_resultados
-    st.dataframe(df[['title', 'channel', 'views', 'views_por_dia', 'published_at', 'search_term']])
+    st.dataframe(df[['title', 'channel', 'views', 'views_por_dia', 'duration', 'published_at', 'search_term']])
 
     # CORRIGIDO: gerar CSV com BOM usando BytesIO
     output = io.BytesIO()
