@@ -13,107 +13,91 @@ API_KEY = st.secrets["API_KEY"]
 
 def buscar_videos(termo, max_results=30, min_views=10000, max_idade_dias=180,
                   min_subs=1000, max_subs=1000000, region_code=None,
-                  video_duration="any", relevance_language=None,
-                  page_token=None):
+                  video_duration='any', relevance_language=None):
     resultados = []
+    published_after = (datetime.utcnow() - timedelta(days=2*365)).isoformat('T') + 'Z'
     next_page_token = None
-    published_after = (datetime.utcnow() - timedelta(days=2*365)).isoformat("T") + "Z"
 
-    base_url = 'https://www.googleapis.com/youtube/v3/search'
-    params = {
-        'part': 'snippet',
-        'q': termo,
-        'type': 'video',
-        'order': 'viewCount',
-        'videoDuration': video_duration,
-        'publishedAfter': published_after,
-        'maxResults': max_results,
-        'key': API_KEY
-    }
-    if region_code:
-        params['regionCode'] = region_code
-    if relevance_language:
-        params['relevanceLanguage'] = relevance_language
-    if page_token:
-        params['pageToken'] = page_token
+    while len(resultados) < max_results:
+        params = {
+            'part': 'snippet',
+            'q': termo,
+            'type': 'video',
+            'order': 'viewCount',
+            'videoDuration': video_duration,
+            'publishedAfter': published_after,
+            'maxResults': 50,
+            'key': API_KEY
+        }
+        if region_code:
+            params['regionCode'] = region_code
+        if relevance_language:
+            params['relevanceLanguage'] = relevance_language
+        if next_page_token:
+            params['pageToken'] = next_page_token
 
-    response = requests.get(base_url, params=params).json()
-    next_page_token = response.get('nextPageToken')
+        resp = requests.get('https://www.googleapis.com/youtube/v3/search', params=params).json()
+        next_page_token = resp.get('nextPageToken')
+        items = resp.get('items', [])
+        if not items:
+            break
 
-    for item in response.get('items', []):
-        try:
+        for item in items:
             snippet = item['snippet']
+            default_audio_language = snippet.get('defaultAudioLanguage')
+            thumbnail_url = snippet.get('thumbnails', {}).get('default', {}).get('url')
+            if relevance_language and default_audio_language != relevance_language:
+                continue
+
             video_id = item['id']['videoId']
             title = snippet['title']
             published_at = snippet['publishedAt']
-            channel_title = snippet['channelTitle']
             channel_id = snippet['channelId']
-            default_audio_language = snippet.get('defaultAudioLanguage')
-            thumbnail_url = snippet.get('thumbnails', {}).get('default', {}).get('url')
+            channel_title = snippet['channelTitle']
 
-            # Fetch video stats
-            stats_url = 'https://www.googleapis.com/youtube/v3/videos'
-            stats_params = {
-                'part': 'statistics,contentDetails',
-                'id': video_id,
-                'key': API_KEY
-            }
-            stats_response = requests.get(stats_url, params=stats_params).json()
-            items_stats = stats_response.get('items', [])
-            if not items_stats:
+            stats_items = requests.get(
+                'https://www.googleapis.com/youtube/v3/videos',
+                params={'part': 'statistics,contentDetails', 'id': video_id, 'key': API_KEY}
+            ).json().get('items', [])
+            if not stats_items:
                 continue
-            stats = items_stats[0]['statistics']
-            duration = items_stats[0]['contentDetails']['duration']
-            views = int(stats.get('viewCount', 0))
-
-            # Duration filter: >= 180s
-            duracao_segundos = parse_duration(duration).total_seconds()
-            if duracao_segundos < 180:
-                continue
-            if views < min_views:
+            stats = stats_items[0]
+            views = int(stats['statistics'].get('viewCount', 0))
+            duration = stats['contentDetails']['duration']
+            if parse_duration(duration).total_seconds() < 180 or views < min_views:
                 continue
 
-            # Age filter
-            data_publicacao = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
-            dias_desde_pub = (datetime.utcnow() - data_publicacao).days
-            if dias_desde_pub > max_idade_dias:
+            pub_date = datetime.strptime(published_at, '%Y-%m-%dT%H:%M:%SZ')
+            if (datetime.utcnow() - pub_date).days > max_idade_dias:
                 continue
 
-            # Channel stats
-            channel_url = 'https://www.googleapis.com/youtube/v3/channels'
-            channel_params = {
-                'part': 'statistics',
-                'id': channel_id,
-                'key': API_KEY
-            }
-            channel_response = requests.get(channel_url, params=channel_params).json()
-            canal_info = channel_response.get('items', [])
-            if not canal_info:
+            ch_items = requests.get(
+                'https://www.googleapis.com/youtube/v3/channels',
+                params={'part': 'statistics', 'id': channel_id, 'key': API_KEY}
+            ).json().get('items', [])
+            if not ch_items:
                 continue
-            subs = int(canal_info[0]['statistics'].get('subscriberCount', 0))
+            subs = int(ch_items[0]['statistics'].get('subscriberCount', 0))
             if subs < min_subs or subs > max_subs:
                 continue
 
             resultados.append({
-                'video_id': video_id,
-                'title': title,
-                'published_at': published_at,
-                'channel': channel_title,
-                'views': views,
-                'likes': int(stats.get('likeCount', 0)),
-                'comments': int(stats.get('commentCount', 0)),
-                'duration': duration,
-                'search_term': termo,
-                'subscribers': subs,
-                'thumbnail': thumbnail_url,
+                'video_id': video_id, 'title': title, 'published_at': published_at,
+                'channel': channel_title, 'views': views,
+                'likes': int(stats['statistics'].get('likeCount', 0)),
+                'comments': int(stats['statistics'].get('commentCount', 0)),
+                'duration': duration, 'search_term': termo,
+                'subscribers': subs, 'thumbnail': thumbnail_url,
                 'default_audio_language': default_audio_language
             })
             time.sleep(0.1)
-        except Exception as e:
-            print("Erro:", e)
-            continue
+            if len(resultados) >= max_results:
+                break
 
-    return resultados, next_page_token
+        if not next_page_token:
+            break
+
+    return resultados[:max_results], next_page_token
 
 def limpar_nome_arquivo(titulo):
     return re.sub(r'[\\/*?:"<>|]', "", titulo)[:100]
