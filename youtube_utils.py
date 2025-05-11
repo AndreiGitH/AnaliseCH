@@ -12,33 +12,32 @@ import zipfile
 API_KEY = st.secrets["API_KEY"]
 
 # ---------------------------------------------------------------------------
-# Função principal: buscar_videos -------------------------------------------------
+# Função principal: buscar_videos
 # ---------------------------------------------------------------------------
-#   • Pagina automaticamente enquanto houver nextPageToken.
-#   • Aplica filtros min_views, idade máxima, inscritos‑canal, duração ≥ 180 s.
-#   • Agora injeta o campo "video_url" (link clicável) e deixa o filtro de
-#     inscritos opcional (se max_subs == 0 não filtra teto; se min_subs == 0 não
-#     filtra piso).
+#   - Pagina automaticamente enquanto houver nextPageToken
+#   - Filtros configuráveis: views, idade, inscritos, duração ≥ 180 s
+#   - Se o parâmetro de filtro = 0, a regra é ignorada (ex.: max_idade_dias = 0 → sem limite)
+#   - Retorna link (video_url) e miniatura (thumbnail)
 # ---------------------------------------------------------------------------
 
 def buscar_videos(
     termo: str,
     max_results: int = 30,
-    min_views: int = 10_000,
-    max_idade_dias: int = 180,
-    min_subs: int = 1_000,
-    max_subs: int = 1_000_000,
+    min_views: int = 0,
+    max_idade_dias: int = 0,
+    min_subs: int = 0,
+    max_subs: int = 0,
     region_code: str | None = None,
     video_duration: str = "any",
     relevance_language: str | None = None,
 ):
     resultados: list[dict] = []
-    next_page_token: str | None = None
+    next_token: str | None = None
 
-    # dois anos de recorte para PublishedAfter (pode ser ajustado externamente)
-    published_after = (
-        datetime.utcnow() - timedelta(days=365 * 2)
-    ).isoformat("T") + "Z"
+    # PublishedAfter só usado se max_idade_dias > 0
+    published_after = None
+    if max_idade_dias > 0:
+        published_after = (datetime.utcnow() - timedelta(days=max_idade_dias)).isoformat("T") + "Z"
 
     while len(resultados) < max_results:
         params = {
@@ -47,135 +46,114 @@ def buscar_videos(
             "type": "video",
             "order": "viewCount",
             "videoDuration": video_duration,
-            "publishedAfter": published_after,
             "maxResults": 50,
             "key": API_KEY,
         }
+        if published_after:
+            params["publishedAfter"] = published_after
         if region_code:
             params["regionCode"] = region_code
         if relevance_language:
             params["relevanceLanguage"] = relevance_language
-        if next_page_token:
-            params["pageToken"] = next_page_token
+        if next_token:
+            params["pageToken"] = next_token
 
-        search_data = requests.get(
-            "https://www.googleapis.com/youtube/v3/search", params=params
-        ).json()
-
-        next_page_token = search_data.get("nextPageToken")
-        for item in search_data.get("items", []):
+        search = requests.get("https://www.googleapis.com/youtube/v3/search", params=params).json()
+        next_token = search.get("nextPageToken")
+        for it in search.get("items", []):
             try:
-                snip = item["snippet"]
-                default_lang = snip.get("defaultAudioLanguage")
-                if relevance_language and default_lang != relevance_language:
+                snip = it["snippet"]
+                if relevance_language and snip.get("defaultAudioLanguage") != relevance_language:
                     continue
 
-                video_id = item["id"]["videoId"]
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                vid = it["id"]["videoId"]
+                video_url = f"https://www.youtube.com/watch?v={vid}"
                 title = snip["title"]
-                published_at = snip["publishedAt"]
-                channel_id = snip["channelId"]
-                channel_title = snip["channelTitle"]
-                thumb_url = snip.get("thumbnails", {}).get("default", {}).get("url")
+                pub_at = snip["publishedAt"]
+                chan_id = snip["channelId"]
+                chan_title = snip["channelTitle"]
+                thumb = snip.get("thumbnails", {}).get("default", {}).get("url")
 
-                # -------- Stats do vídeo --------
-                stats_data = requests.get(
+                # Stats vídeo
+                v = requests.get(
                     "https://www.googleapis.com/youtube/v3/videos",
-                    params={
-                        "part": "statistics,contentDetails",
-                        "id": video_id,
-                        "key": API_KEY,
-                    },
+                    params={"part": "statistics,contentDetails", "id": vid, "key": API_KEY},
                 ).json()
-                if not stats_data.get("items"):
+                if not v.get("items"):
                     continue
-                vstats = stats_data["items"][0]
+                vstats = v["items"][0]
                 views = int(vstats["statistics"].get("viewCount", 0))
                 duration = vstats["contentDetails"]["duration"]
-
-                # Filtros: views e duração (≥ 3 min)
-                if views < min_views or parse_duration(duration).total_seconds() < 180:
+                if (min_views and views < min_views) or parse_duration(duration).total_seconds() < 180:
                     continue
 
-                # Filtro: idade do vídeo
-                pub_dt = datetime.strptime(published_at, "%Y-%m-%dT%H:%M:%SZ")
-                if (datetime.utcnow() - pub_dt).days > max_idade_dias:
-                    continue
+                # Filtro idade local (caso max_idade_dias = 0, ignora)
+                if max_idade_dias > 0:
+                    pub_dt = datetime.strptime(pub_at, "%Y-%m-%dT%H:%M:%SZ")
+                    if (datetime.utcnow() - pub_dt).days > max_idade_dias:
+                        continue
 
-                # -------- Stats do canal --------
-                ch_stats = requests.get(
+                # Stats canal
+                c = requests.get(
                     "https://www.googleapis.com/youtube/v3/channels",
-                    params={
-                        "part": "statistics",
-                        "id": channel_id,
-                        "key": API_KEY,
-                    },
+                    params={"part": "statistics", "id": chan_id, "key": API_KEY},
                 ).json()
-                if not ch_stats.get("items"):
+                if not c.get("items"):
                     continue
-                subs = int(ch_stats["items"][0]["statistics"].get("subscriberCount", 0))
-
-                # Inscritos – só filtra se o usuário realmente definir limites >0
-                if (min_subs and subs < min_subs) or (max_subs and max_subs > 0 and subs > max_subs):
+                subs = int(c["items"][0]["statistics"].get("subscriberCount", 0))
+                if (min_subs and subs < min_subs) or (max_subs and subs > max_subs):
                     continue
 
                 resultados.append(
                     {
-                        "video_id": video_id,
+                        "video_id": vid,
                         "video_url": video_url,
                         "title": title,
-                        "published_at": published_at,
-                        "channel": channel_title,
+                        "published_at": pub_at,
+                        "channel": chan_title,
                         "views": views,
                         "likes": int(vstats["statistics"].get("likeCount", 0)),
                         "comments": int(vstats["statistics"].get("commentCount", 0)),
                         "duration": duration,
                         "search_term": termo,
                         "subscribers": subs,
-                        "thumbnail": thumb_url,
-                        "default_audio_language": default_lang,
+                        "thumbnail": thumb,
+                        "default_audio_language": snip.get("defaultAudioLanguage"),
                     }
                 )
-
-                # pequena pausa para respeitar quotas
                 time.sleep(0.05)
-
                 if len(resultados) >= max_results:
                     break
-            except Exception as exc:
-                print("[buscar_videos] erro:", exc)
+            except Exception as err:
+                print("[buscar_videos] erro:", err)
                 continue
-
-        if not next_page_token:
+        if not next_token:
             break
-
     return resultados[:max_results]
 
-
 # ---------------------------------------------------------------------------
-# Utilidades de arquivo / thumbnails ---------------------------------------
+# Utilidades de arquivo / thumbnails
 # ---------------------------------------------------------------------------
 
 def limpar_nome_arquivo(titulo: str) -> str:
-    """Sanitiza título para uso como nome de arquivo."""
     return re.sub(r"[\\/*?:\"<>|]", "", titulo)[:100]
 
 
 def baixar_thumbs(df: pd.DataFrame, pasta: str = "thumbs") -> str:
     os.makedirs(pasta, exist_ok=True)
-    arquivos = []
+    arqs = []
     for _, row in df.iterrows():
         vid = row["video_id"]
-        titulo = limpar_nome_arquivo(row["title"])
+        nome = limpar_nome_arquivo(row["title"])
         url = row.get("thumbnail") or f"https://img.youtube.com/vi/{vid}/maxresdefault.jpg"
-        destino = os.path.join(pasta, f"{titulo}_{vid}.jpg")
+        dest = os.path.join(pasta, f"{nome}_{vid}.jpg")
         try:
-            urlretrieve(url, destino)
-            arquivos.append(destino)
+            urlretrieve(url, dest)
+            arqs.append(dest)
         except Exception as e:
-            print("Erro ao baixar thumb", vid, e)
-    zip_path = "thumbnails.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        for arq in arquivos:
-            zf.write(arq, arcname=os.path.basename(arq))
-    return zip_path
+            print("Thumb", vid, e)
+    zpath = "thumbnails.zip"
+    with zipfile.ZipFile(zpath, "w") as zf:
+        for a in arqs:
+            zf.write(a, arcname=os.path.basename(a))
+    return zpath
