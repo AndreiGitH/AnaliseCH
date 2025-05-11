@@ -10,11 +10,11 @@ API_KEY = st.secrets["API_KEY"]
 
 # ---------------------------------------------------------------------------
 # buscar_videos
-#   • pagina automaticamente até juntar max_results
-#   • filtros só valem se o parâmetro > 0
-#   • aceita page_token de partida, caso o front‑end queira continuar
-#   • devolve thumbnail e link pronto (video_url)
+#   • Page‑token primeiro → paginação externa opcional
+#   • Filtros ignorados quando valor = 0 (idade, views, subs)
+#   • Retorna (lista_resultados, next_page_token)
 # ---------------------------------------------------------------------------
+
 def buscar_videos(
     termo: str,
     max_results: int = 30,
@@ -28,15 +28,15 @@ def buscar_videos(
     page_token: str | None = None,
 ):
     resultados: list[dict] = []
-    next_token: str | None = page_token  # se vier do front‑end
+    next_token: str | None = page_token  # permite iniciar em página arbitrária
 
-    # publishedAfter só se max_idade_dias > 0
     published_after = None
     if max_idade_dias > 0:
-        published_after = (datetime.utcnow() - timedelta(days=max_idade_dias)).isoformat("T") + "Z"
+        published_after = (
+            datetime.utcnow() - timedelta(days=max_idade_dias)
+        ).isoformat("T") + "Z"
 
     while len(resultados) < max_results:
-        # -------- 1ª chamada: /search ---------------------------------------
         params = {
             "part": "snippet",
             "q": termo,
@@ -64,44 +64,45 @@ def buscar_videos(
                 if relevance_language and snip.get("defaultAudioLanguage") != relevance_language:
                     continue
 
-                vid       = it["id"]["videoId"]
+                vid = it["id"]["videoId"]
                 video_url = f"https://www.youtube.com/watch?v={vid}"
-                title     = snip["title"]
-                pub_at    = snip["publishedAt"]
-                chan_id   = snip["channelId"]
-                chan_ttl  = snip["channelTitle"]
-                thumb     = snip.get("thumbnails", {}).get("default", {}).get("url")
+                title = snip["title"]
+                pub_at = snip["publishedAt"]
+                chan_id = snip["channelId"]
+                chan_title = snip["channelTitle"]
+                thumb = snip.get("thumbnails", {}).get("default", {}).get("url")
 
-                # -------- 2ª chamada: /videos (stats + duração) ---------------
-                v = requests.get(
+                # Stats vídeo ------------------------------------------------
+                vstats_json = requests.get(
                     "https://www.googleapis.com/youtube/v3/videos",
                     params={"part": "statistics,contentDetails", "id": vid, "key": API_KEY},
                 ).json()
-                if not v.get("items"):
+                if not vstats_json.get("items"):
                     continue
-                vstats    = v["items"][0]
-                views     = int(vstats["statistics"].get("viewCount", 0))
-                duration  = vstats["contentDetails"]["duration"]
+                vstats = vstats_json["items"][0]
+                views = int(vstats["statistics"].get("viewCount", 0))
+                duration = vstats["contentDetails"]["duration"]
 
                 if min_views and views < min_views:
                     continue
-                if parse_duration(duration).total_seconds() < 180:  # 3 min
-                    continue
+                if parse_duration(duration).total_seconds() < 180:
+                    continue  # rejeita < 3 min
 
-                # filtro de idade extra (caso max_idade_dias > 0)
+                # filtro idade local
                 if max_idade_dias > 0:
                     pub_dt = datetime.strptime(pub_at, "%Y-%m-%dT%H:%M:%SZ")
                     if (datetime.utcnow() - pub_dt).days > max_idade_dias:
                         continue
 
-                # -------- 3ª chamada: /channels (subs) ------------------------
-                c = requests.get(
+                # Stats canal ----------------------------------------------
+                cstats_json = requests.get(
                     "https://www.googleapis.com/youtube/v3/channels",
                     params={"part": "statistics", "id": chan_id, "key": API_KEY},
                 ).json()
-                if not c.get("items"):
+                if not cstats_json.get("items"):
                     continue
-                subs = int(c["items"][0]["statistics"].get("subscriberCount", 0))
+                subs = int(cstats_json["items"][0]["statistics"].get("subscriberCount", 0))
+
                 if (min_subs and subs < min_subs) or (max_subs and subs > max_subs):
                     continue
 
@@ -111,7 +112,7 @@ def buscar_videos(
                         "video_url": video_url,
                         "title": title,
                         "published_at": pub_at,
-                        "channel": chan_ttl,
+                        "channel": chan_title,
                         "views": views,
                         "likes": int(vstats["statistics"].get("likeCount", 0)),
                         "comments": int(vstats["statistics"].get("commentCount", 0)),
@@ -122,41 +123,41 @@ def buscar_videos(
                         "default_audio_language": snip.get("defaultAudioLanguage"),
                     }
                 )
-                time.sleep(0.05)
                 if len(resultados) >= max_results:
                     break
             except Exception as err:
                 print("[buscar_videos] erro:", err)
                 continue
-
-        if not next_token:
+        if not next_token or len(resultados) >= max_results:
             break
 
-    return resultados[:max_results]
+        # Pequena pausa para não estourar cota
+        time.sleep(0.05)
+
+    return resultados[:max_results], next_token
 
 # ---------------------------------------------------------------------------
-# Utilidades de arquivo / thumbnails
-# ---------------------------------------------------------------------------
+# THUMBNAILS ---------------------------------------------------------------
+
 def limpar_nome_arquivo(titulo: str) -> str:
     return re.sub(r"[\\/*?:\"<>|]", "", titulo)[:100]
 
 
 def baixar_thumbs(df: pd.DataFrame, pasta: str = "thumbs") -> str:
     os.makedirs(pasta, exist_ok=True)
-    arqs = []
+    arquivos = []
     for _, row in df.iterrows():
-        vid  = row["video_id"]
+        vid = row["video_id"]
         nome = limpar_nome_arquivo(row["title"])
-        url  = row.get("thumbnail") or f"https://img.youtube.com/vi/{vid}/maxresdefault.jpg"
-        dest = os.path.join(pasta, f"{nome}_{vid}.jpg")
+        url = row.get("thumbnail") or f"https://img.youtube.com/vi/{vid}/maxresdefault.jpg"
+        destino = os.path.join(pasta, f"{nome}_{vid}.jpg")
         try:
-            urlretrieve(url, dest)
-            arqs.append(dest)
+            urlretrieve(url, destino)
+            arquivos.append(destino)
         except Exception as e:
-            print("Thumb", vid, e)
-
-    zpath = "thumbnails.zip"
-    with zipfile.ZipFile(zpath, "w") as zf:
-        for a in arqs:
-            zf.write(a, arcname=os.path.basename(a))
-    return zpath
+            print("Erro thumb", vid, e)
+    zip_path = "thumbnails.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for arq in arquivos:
+            zf.write(arq, arcname=os.path.basename(arq))
+    return zip_path
