@@ -4,6 +4,10 @@ import os
 import io
 from youtube_utils import buscar_videos, baixar_thumbs
 
+# Inicializa session_state
+if 'df_resultados' not in st.session_state:
+    st.session_state.df_resultados = None
+
 st.set_page_config(page_title="Buscador de Vídeos Bíblicos", layout="wide")
 st.title("Buscador de Vídeos Virais")
 
@@ -68,7 +72,7 @@ video_duration = duracao_map[duracao]
 # Botão de Ação
 # ----------------------
 if st.sidebar.button("Buscar vídeos"):
-    # Monta query OR
+    # Combina termos para OR
     query = " OR ".join(f'"{t}"' for t in termos)
     todos_videos = []
     next_page = None
@@ -118,7 +122,7 @@ if st.sidebar.button("Buscar vídeos"):
 # ----------------------
 if st.session_state.df_resultados is not None:
     df = st.session_state.df_resultados.copy()
-    # Tabela ordenável com URLs brutos
+    # Tabela ordenável com URLs brutos e thumb URL
     st.dataframe(df[[
         'thumbnail_url', 'title', 'channel', 'views', 'views_por_dia',
         'duration', 'published_at', 'link_url'
