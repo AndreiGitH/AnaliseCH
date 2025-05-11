@@ -7,58 +7,71 @@ from youtube_utils import buscar_videos, baixar_thumbs
 st.set_page_config(page_title="Buscador de Vídeos Bíblicos", layout="wide")
 st.title("Buscador de Vídeos Virais")
 
-if 'df_resultados' not in st.session_state:
-    st.session_state.df_resultados = None
+# ----------------------
+# Sidebar: Configurações de Busca
+# ----------------------
+st.sidebar.header("Configurações de Busca")
 
-# CARREGAR TERMOS PADRÃO DE TXT
+# Termos de Busca
 TERMO_BUSCA_PADRAO = "termos_busca.txt"
-NEGATIVOS_PADRAO = "termos_excluir.txt"
-CANAIS_EXCLUIR_PADRAO = "canais_excluir.txt"
-
 valor_termos = ""
 if os.path.exists(TERMO_BUSCA_PADRAO):
     with open(TERMO_BUSCA_PADRAO, encoding="utf-8") as f:
         valor_termos = f.read()
-
-termos_input = st.text_area("Digite os termos para buscar (1 por linha):", value=valor_termos)
+termos_input = st.sidebar.text_area(
+    "Termos para buscar (1 por linha):", value=valor_termos, height=150
+)
 termos = [t.strip() for t in termos_input.splitlines() if t.strip()]
 
+# Termos Negativos
+NEGATIVOS_PADRAO = "termos_excluir.txt"
 valor_negativos = ""
 if os.path.exists(NEGATIVOS_PADRAO):
     with open(NEGATIVOS_PADRAO, encoding="utf-8") as f:
         valor_negativos = f.read()
-negativos = [t.strip().lower() for t in valor_negativos.splitlines() if t.strip()]
+negativos_input = st.sidebar.text_area(
+    "Excluir títulos que contenham (1 por linha):", value=valor_negativos, height=150
+)
+negativos = [t.strip().lower() for t in negativos_input.splitlines() if t.strip()]
 
+# Canais a Excluir
+CANAIS_EXCLUIR_PADRAO = "canais_excluir.txt"
 valor_canais = ""
 if os.path.exists(CANAIS_EXCLUIR_PADRAO):
     with open(CANAIS_EXCLUIR_PADRAO, encoding="utf-8") as f:
         valor_canais = f.read()
-canais_excluidos = [c.strip().lower() for c in valor_canais.splitlines() if c.strip()]
+canais_input = st.sidebar.text_area(
+    "Excluir vídeos destes canais (1 por linha):", value=valor_canais, height=150
+)
+canais_excluidos = [c.strip().lower() for c in canais_input.splitlines() if c.strip()]
 
-# PARÂMETROS DE BUSCA
-max_results = st.number_input("Quantidade de vídeos a buscar:", min_value=1, max_value=200, value=50)
-min_views = st.number_input("Visualizações mínimas:", min_value=0, value=10000, step=1000)
-min_inscritos = st.number_input("Mínimo de inscritos no canal:", min_value=0, value=0, step=100)
-max_inscritos = st.number_input("Máximo de inscritos no canal:", min_value=0, value=10000000, step=1000)
-max_idade_dias = st.number_input("Idade máxima do vídeo (dias, 0 = sem filtro):", min_value=0, value=180, step=1)
+# Parâmetros Adicionais
+st.sidebar.subheader("Filtros Avançados")
+max_results = st.sidebar.number_input("Quantidade de vídeos a buscar:", min_value=1, max_value=200, value=50)
+min_views = st.sidebar.number_input("Visualizações mínimas:", min_value=0, value=10000, step=1000)
+min_inscritos = st.sidebar.number_input("Mínimo de inscritos no canal:", min_value=0, value=0, step=100)
+max_inscritos = st.sidebar.number_input("Máximo de inscritos no canal:", min_value=0, value=10000000, step=1000)
+max_idade_dias = st.sidebar.number_input("Idade máxima do vídeo (dias, 0 = sem filtro):", min_value=0, value=180, step=1)
 
-pais = st.selectbox("Filtrar por país:", ["Todos", "BR", "US", "IL", "IN", "PT", "MX"])
+pais = st.sidebar.selectbox("Filtrar por país:", ["Todos", "BR", "US", "IL", "IN", "PT", "MX"])
 region_code = None if pais == "Todos" else pais
 
-idioma = st.selectbox("Filtrar por idioma:", ["Todos", "Português", "Inglês", "Espanhol"])
+idioma = st.sidebar.selectbox("Filtrar por idioma:", ["Todos", "Português", "Inglês", "Espanhol"])
 lang_map = {"Todos": None, "Português": "pt", "Inglês": "en", "Espanhol": "es"}
 relevance_language = lang_map[idioma]
 
-duracao = st.selectbox("Filtrar duração:", ["Todos", "Curtos (<4min)", "Médios (4-20min)", "Longos (>20min)"])
+duracao = st.sidebar.selectbox("Filtrar duração:", ["Todos", "Curtos (<4min)", "Médios (4-20min)", "Longos (>20min)"])
 duracao_map = {"Todos": "any", "Curtos (<4min)": "short", "Médios (4-20min)": "medium", "Longos (>20min)": "long"}
 video_duration = duracao_map[duracao]
 
-if st.button("Buscar vídeos"):
-    # Combina termos com OR para busca ampla
+# ----------------------
+# Botão de Ação
+# ----------------------
+if st.sidebar.button("Buscar vídeos"):
+    # Monta query OR
     query = " OR ".join(f'"{t}"' for t in termos)
     todos_videos = []
     next_page = None
-
     with st.spinner("Buscando vídeos..."):
         while len(todos_videos) < max_results:
             batch, next_page = buscar_videos(
@@ -79,7 +92,7 @@ if st.button("Buscar vídeos"):
 
     df = pd.DataFrame(todos_videos).drop_duplicates(subset='video_id')
 
-    # Filtra negativos e canais
+    # Aplica filtros locais de exclusão
     if not df.empty:
         if negativos:
             df = df[~df['title'].str.lower().str.contains('|'.join(negativos))]
@@ -90,28 +103,29 @@ if st.button("Buscar vídeos"):
         st.warning("Nenhum vídeo encontrado com os filtros aplicados.")
         st.session_state.df_resultados = None
     else:
-        # Métricas adicionais
+        # Processa colunas adicionais
         df['published_at'] = pd.to_datetime(df['published_at'])
         df['dias_desde_pub'] = (pd.Timestamp.utcnow() - df['published_at']).dt.days
         df['views_por_dia'] = (df['views'] / df['dias_desde_pub'].replace(0, 1)).round(2)
-        # Colunas para ordenação
         df['thumbnail_url'] = df['thumbnail']
         df['link_url'] = df['video_url']
-        # Link clicável em Markdown
-        df['link'] = df['video_url'].apply(lambda x: f"[Abrir vídeo]({x})")
+        df['link_md'] = df['video_url'].apply(lambda x: f"[Abrir vídeo]({x})")
         st.session_state.df_resultados = df
         st.success(f"{len(df)} vídeos encontrados.")
 
+# ----------------------
+# Exibição dos Resultados
+# ----------------------
 if st.session_state.df_resultados is not None:
     df = st.session_state.df_resultados.copy()
-    # Exibe tabela interativa (ordenável) com URLs
-    st.dataframe(df[
-        ['thumbnail_url', 'title', 'channel', 'views', 'views_por_dia',
-         'duration', 'published_at', 'link_url']
-    ])
+    # Tabela ordenável com URLs brutos
+    st.dataframe(df[[
+        'thumbnail_url', 'title', 'channel', 'views', 'views_por_dia',
+        'duration', 'published_at', 'link_url'
+    ]])
 
-    # Exibe thumbnails e links clicáveis abaixo
-    st.markdown("### Miniaturas e links")
+    # Miniaturas e links clicáveis
+    st.markdown("### Miniaturas e Links")
     for _, row in df.iterrows():
         cols = st.columns([1, 4])
         cols[0].image(row['thumbnail'], width=120)
@@ -120,15 +134,14 @@ if st.session_state.df_resultados is not None:
             f"Canal: {row['channel']}  \n"
             f"Views: {row['views']}  \n"
             f"Publicado em: {row['published_at'].date()}  \n"
-            f"[Abrir vídeo]({row['video_url']})"
+            f"{row['link_md']}"
         )
 
-    # Download CSV
+    # Botões de download
     output = io.BytesIO()
     df.to_csv(output, sep=';', decimal=',', encoding='utf-8-sig', index=False, float_format='%.2f')
     st.download_button("📅 Baixar CSV", data=output.getvalue(), file_name="videos_biblicos.csv", mime="text/csv")
 
-    # Download Thumbnails ZIP
     if st.button("📸 Baixar Thumbnails"):
         zip_file_path = baixar_thumbs(df)
         with open(zip_file_path, "rb") as fp:
