@@ -41,11 +41,11 @@ if os.path.exists(CANAIS_EXCLUIR_PADRAO):
 canais_excluidos = [c.strip().lower() for c in valor_canais.splitlines() if c.strip()]
 
 # PARÂMETROS DE FILTRO
-max_results    = st.number_input("Quantidade de vídeos por termo:", min_value=1, max_value=50, value=30, step=1)
+max_results    = st.number_input("Quantidade de vídeos por termo:", min_value=1, max_value=50, value=50, step=1)
 min_views      = st.number_input("Visualizações mínimas:", min_value=0, value=10000, step=1000)
 min_inscritos  = st.number_input("Mínimo de inscritos no canal:", min_value=0, value=1000, step=100)
 max_inscritos  = st.number_input("Máximo de inscritos no canal:", min_value=0, value=1000000, step=1000)
-max_idade_dias = st.number_input("Idade máxima do vídeo (dias):", min_value=1, value=180, step=1)
+max_idade_dias = st.number_input("Idade máxima do vídeo (dias):", min_value=0, value=180, step=30)
 
 # País e idioma
 pais = st.selectbox("Filtrar por país:", ["Todos", "BR", "US", "IL", "IN", "PT", "MX"])
