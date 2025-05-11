@@ -30,6 +30,17 @@ def buscar_videos(
     region_code: str | None = None,
     video_duration: str = "any",
     relevance_language: str | None = None,
+    page_token: str | None = None,  # <‑‑ agora aceitamos page_token opcional
+):
+    termo: str,
+    max_results: int = 30,
+    min_views: int = 0,
+    max_idade_dias: int = 0,
+    min_subs: int = 0,
+    max_subs: int = 0,
+    region_code: str | None = None,
+    video_duration: str = "any",
+    relevance_language: str | None = None,
 ):
     resultados: list[dict] = []
     next_token: str | None = None
